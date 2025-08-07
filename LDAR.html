@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pipeline Peril</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #111;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: 'Press Start 2P', cursive;
+            color: #00ff00;
+            user-select: none;
+        }
+
+        #gameContainer {
+            position: relative;
+            width: 640px;
+            height: 480px;
+        }
+
+        #gameCanvas {
+            border: 2px solid #00ff00;
+            background-color: #000;
+            image-rendering: pixelated;
+            image-rendering: -moz-crisp-edges;
+            image-rendering: crisp-edges;
+            cursor: default;
+        }
+
+        #gameUI {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #00ff00;
+            font-size: 18px;
+            text-shadow: 2px 2px 0 #000;
+            z-index: 10;
+        }
+
+        #debugInfo {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: #00ff00;
+            font-size: 12px;
+            text-shadow: 1px 1px 0 #000;
+            z-index: 10;
+        }
+
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 2px;
+            height: 2px;
+            background-color: #ff0000;
+            box-shadow: 0 0 0 1px #000;
+            z-index: 11;
+        }
+
+        #loadingScreen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            color: #00ff00;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 24px;
+            text-align: center;
+            flex-direction: column;
+            z-index: 100;
+        }
+
+        #loadingBar {
+            width: 300px;
+            height: 20px;
+            border: 2px solid #00ff00;
+            margin-top: 20px;
+        }
+
+        #loadingProgress {
+            height: 100%;
+            background-color: #00ff00;
+            width: 0%;
+        }
+
+        #startScreen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            z-index: 100;
+            cursor: pointer;
+            
+            /* --- NEW CSS FOR SPLASH IMAGE --- */
+            background-image: url('splash_start.png');
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: center;
+            /* -------------------------------- */
+        }
+    </style>
+</head>
+<body>
+    <div id="loadingScreen">
+        Loading Assets...
+        <div id="loadingBar"><div id="loadingProgress"></div></div>
+    </div>
+    
+    <div id="startScreen" style="display: none;">
+        </div>
+
+    <div id="gameContainer">
+        <canvas id="gameCanvas" width="640" height="480"></canvas>
+        <div id="crosshair"></div>
+        <div id="gameUI">
+            <span>SCORE: <span id="score">0</span></span>
+            <span style="margin-left: 20px;">HEALTH: <span id="health">100</span></span>
+            
+        </div>
+        <div id="debugInfo">
+            FPS: <span id="fps">0</span><br>
+            POS: X <span id="posX">0.0</span> Y <span id="posY">0.0</span><br>
+            ANGLE: <span id="angle">0.0</span>
+        </div>
+    </div>
+
+    <audio id="damageSound" src="damage.mp3" preload="auto"></audio>
+    <audio id="shootSound" src="shoot.mp3" preload="auto"></audio>
+    <audio id="repairSound" src="repair.mp3" preload="auto"></audio>
+    <audio id="backgroundMusic" src="background.mp3" preload="auto" loop></audio>
+
+    <script>
+        // --- Game Setup ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const loadingScreen = document.getElementById('loadingScreen');
+        const loadingProgress = document.getElementById('loadingProgress');
+        const startScreen = document.getElementById('startScreen');
+
+        const MAP_WIDTH = 24;
+        const MAP_HEIGHT = 12;
+        const TILE_SIZE = 64;
+        const WALL_HEIGHT_WORLD = TILE_SIZE;
+
+        const MAP_DATA_RAW = [
+            "wwwwwwwwwwwwwwwwwwwwwwwww",
+            "wP ww   ww   wwL www    w",
+            "wL ww w ww w www www ww w",
+            "w  ww w ww w www www ww w",
+            "w  LW w ww w Lww wwL ww w",
+            "w  wL w ww w Lww www ww w",
+            "w  ww w Lw w Lww www ww w",
+            "w  ww w wL w Lww www ww w",
+            "w  ww w ww w wLw wLw ww w",
+            "w     w    w          w w",
+            "wwwwwwwwwwww   wwww     w",
+            "wwwwwwwwwwwwwwwwwwwwwwwwww"
+        ];
+
+        const MAP = [];
+        const initialLeaks = [];
+        let playerStartX, playerStartY;
+        for (let y = 0; y < MAP_DATA_RAW.length; y++) {
+            MAP[y] = [];
+            for (let x = 0; x < MAP_DATA_RAW[y].length; x++) {
+                const char = MAP_DATA_RAW[y][x];
+                if (char === 'w') {
+                    MAP[y][x] = 1;
+                } else {
+                    MAP[y][x] = 0;
+                    if (char === 'P') {
+                        playerStartX = x * TILE_SIZE + TILE_SIZE / 2;
+                        playerStartY = y * TILE_SIZE + TILE_SIZE / 2;
+                    } else if (char === 'L') {
+                        initialLeaks.push({ x: x, y: y });
+                    }
+                }
+            }
+        }
+
+        const player = {
+            x: playerStartX || TILE_SIZE * 1.5,
+            y: playerStartY || TILE_SIZE * 1.5,
+            angle: Math.PI / 2,
+            fov: Math.PI / 3,
+            turnSpeed: 0.05,
+            moveSpeed: 3,
+            health: 100,
+            score: 0
+        };
+
+        const NUM_RAYS = canvas.width;
+        const FLOOR_COLOR = '#333333';
+        const CEILING_COLOR = '#222222';
+
+        // --- Asset Management (Refactored) ---
+        const assets = {
+            images: {},
+            audio: {}
+        };
+
+        const assetUrls = {
+            images: {
+                wall: 'piping_wall_texture.png',
+                ogiCarried: 'ogi_carried.png',
+                ogiActivated: 'ogi_activated.png',
+                minorLeak: 'minor_leak_sprite.png',
+                moderateLeak: 'moderate_leak_sprite.png',
+                majorLeak: 'major_leak_sprite.png',
+            },
+            audio: {
+                damage: 'damage.mp3',
+                shoot: 'shoot.mp3',
+                repair: 'repair.mp3',
+                backgroundMusic: 'background.mp3',
+            }
+        };
+        
+        async function loadAssets() {
+            const imagePromises = Object.keys(assetUrls.images).map(key => {
+                return new Promise((resolve, reject) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        assets.images[key] = img;
+                        resolve();
+                    };
+                    img.onerror = () => reject(`Failed to load image: ${assetUrls.images[key]}`);
+                    img.src = assetUrls.images[key];
+                });
+            });
+
+            const audioPromises = Object.keys(assetUrls.audio).map(key => {
+                return new Promise((resolve, reject) => {
+                    let audioEl;
+                    if (key === 'backgroundMusic') {
+                        audioEl = document.getElementById('backgroundMusic');
+                    } else {
+                        audioEl = document.getElementById(`${key}Sound`);
+                    }
+                    
+                    if (!audioEl) {
+                        return reject(`Audio element not found for key: ${key}`);
+                    }
+
+                    audioEl.oncanplaythrough = () => {
+                        assets.audio[key] = audioEl;
+                        resolve();
+                    };
+                    audioEl.onerror = () => reject(`Failed to load audio: ${assetUrls.audio[key]}`);
+                });
+            });
+
+            const allPromises = imagePromises.concat(audioPromises);
+            let assetsLoadedCount = 0;
+            const totalAssets = allPromises.length;
+
+            allPromises.forEach(promise => {
+                promise.then(() => {
+                    assetsLoadedCount++;
+                    loadingProgress.style.width = `${(assetsLoadedCount / totalAssets) * 100}%`;
+                });
+            });
+
+            try {
+                await Promise.all(allPromises);
+                loadingScreen.style.display = 'none';
+                console.log("All assets loaded. Waiting for user interaction to start game.");
+                startScreen.style.display = 'flex';
+            } catch (error) {
+                console.error("Game failed to start due to asset loading error:", error);
+                loadingScreen.innerHTML = `<div>Error Loading Assets:</div><div style="font-size: 18px; margin-top: 10px;">${error}</div><div style="font-size: 14px; margin-top: 20px;">Please check your file names and folder location.</div>`;
+            }
+        }
+        
+        startScreen.addEventListener('click', () => {
+            const backgroundMusic = document.getElementById('backgroundMusic');
+            if (backgroundMusic) {
+        backgroundMusic.volume = 0.2; // Set to a value between 0.0 and 1.0
+
+                backgroundMusic.play().catch(e => {
+                    console.log("Background music autoplay was prevented. User interaction required to start music.", e);
+                });
+            }
+            startScreen.style.display = 'none';
+            console.log("Game started!");
+            requestAnimationFrame(gameLoop);
+        });
+
+        // --- Game State and Player Input ---
+        const LEAK_TYPES = {
+            MINOR: { name: "Minor Leak", harm: 0.05, image: 'minorLeak', spriteSize: 300, repairHealth: 50, repairRate: 5, scoreValue: 100, emissionCloudColor: 'rgba(0, 255, 0, 0.4)' },
+            MODERATE: { name: "Moderate Leak", harm: 0.15, image: 'moderateLeak', spriteSize: 450, repairHealth: 100, repairRate: 10, scoreValue: 250, emissionCloudColor: 'rgba(255, 255, 0, 0.4)' },
+            MAJOR: { name: "Major Leak", harm: 0.3, image: 'majorLeak', spriteSize: 600, repairHealth: 200, repairRate: 15, scoreValue: 500, emissionCloudColor: 'rgba(255, 0, 0, 0.4)' }
+        };
+
+        let activeLeaks = [];
+        initialLeaks.forEach(pos => {
+            const types = Object.values(LEAK_TYPES);
+            const randomType = types[Math.floor(Math.random() * types.length)];
+            activeLeaks.push({
+                x: pos.x * TILE_SIZE + TILE_SIZE / 2,
+                y: pos.y * TILE_SIZE + TILE_SIZE / 2,
+                type: randomType,
+                currentHealth: randomType.repairHealth,
+                isDetected: false,
+                cloudAnimationOffset: Math.random() * Math.PI * 2
+            });
+        });
+
+        const keys = { 'w': false, 's': false, 'a': false, 'd': false, ' ': false, 'arrowleft': false, 'arrowright': false, 'arrowup': false, 'arrowdown': false };
+        document.addEventListener('keydown', (e) => {
+            if (e.key === ' ') e.preventDefault();
+            const key = e.key.toLowerCase();
+            if (keys.hasOwnProperty(key)) {
+                keys[key] = true;
+            }
+        });
+        document.addEventListener('keyup', (e) => {
+            const key = e.key.toLowerCase();
+            if (keys.hasOwnProperty(key)) {
+                keys[key] = false;
+            }
+        });
+        
+        const damageSound = document.getElementById('damageSound');
+        const shootSound = document.getElementById('shootSound');
+        const repairSound = document.getElementById('repairSound');
+        let lastHealth = player.health;
+
+        const SHOOT_COOLDOWN = 200;
+        let lastShotTime = 0;
+
+        let lastFrameTime = 0;
+        let frameCount = 0;
+        let lastFpsUpdateTime = 0;
+        let fps = 0;
+        let totalGameTime = 0;
+
+        const fpsElement = document.getElementById('fps');
+        const posXElement = document.getElementById('posX');
+        const posYElement = document.getElementById('posY');
+        const angleElement = document.getElementById('angle');
+        const healthElement = document.getElementById('health');
+        const scoreElement = document.getElementById('score');
+
+        // --- Core Game Functions ---
+
+        function update(currentTime) {
+            totalGameTime += (currentTime - lastFrameTime);
+            let newX = player.x;
+            let newY = player.y;
+
+            if (keys['w'] || keys['arrowup']) {
+                newX += Math.cos(player.angle) * player.moveSpeed;
+                newY += Math.sin(player.angle) * player.moveSpeed;
+            }
+            if (keys['s'] || keys['arrowdown']) {
+                newX -= Math.cos(player.angle) * player.moveSpeed;
+                newY -= Math.sin(player.angle) * player.moveSpeed;
+            }
+            if (keys['a']) {
+                newX += Math.cos(player.angle - Math.PI / 2) * player.moveSpeed;
+                newY += Math.sin(player.angle - Math.PI / 2) * player.moveSpeed;
+            }
+            if (keys['d']) {
+                newX += Math.cos(player.angle + Math.PI / 2) * player.moveSpeed;
+                newY += Math.sin(player.angle + Math.PI / 2) * player.moveSpeed;
+            }
+
+            if (keys['arrowleft']) {
+                player.angle -= player.turnSpeed;
+            }
+            if (keys['arrowright']) {
+                player.angle += player.turnSpeed;
+            }
+
+            let currentMapX = Math.floor(player.x / TILE_SIZE);
+            let currentMapY = Math.floor(player.y / TILE_SIZE);
+
+            let newMapX = Math.floor(newX / TILE_SIZE);
+            let newMapY = Math.floor(newY / TILE_SIZE);
+
+            if (newMapX >= 0 && newMapX < MAP_WIDTH && MAP[currentMapY] && MAP[currentMapY][newMapX] === 0) {
+                player.x = newX;
+            }
+            if (newMapY >= 0 && newMapY < MAP_HEIGHT && MAP[newMapY] && MAP[newMapY][currentMapX] === 0) {
+                player.y = newY;
+            }
+            
+            let tookDamageThisFrame = false;
+            activeLeaks.forEach(leak => {
+                const dist = Math.sqrt(Math.pow(player.x - leak.x, 2) + Math.pow(player.y - leak.y, 2));
+                if (dist < TILE_SIZE / 2) {
+                    player.health -= leak.type.harm;
+                    player.health = Math.max(0, player.health);
+                    if (player.health < lastHealth) tookDamageThisFrame = true;
+                }
+            });
+
+            if (tookDamageThisFrame && damageSound.paused) {
+                damageSound.currentTime = 0;
+                damageSound.play().catch(e => console.log("Audio play prevented (damage):", e));
+            }
+            lastHealth = player.health;
+
+            if (keys[' '] && (currentTime - lastShotTime > SHOOT_COOLDOWN)) {
+                lastShotTime = currentTime;
+                shootSound.currentTime = 0;
+                shootSound.play().catch(e => console.log("Audio play prevented (shoot):", e));
+
+                let closestHitLeak = null;
+                let closestHitDistance = Infinity;
+                let playerDirX = Math.cos(player.angle);
+                let playerDirY = Math.sin(player.angle);
+
+                activeLeaks.forEach(leak => {
+                    const dx = leak.x - player.x;
+                    const dy = leak.y - player.y;
+                    const distanceToLeak = Math.sqrt(dx * dx + dy * dy);
+
+                    const angleToLeak = Math.atan2(dy, dx);
+                    let relativeAngle = angleToLeak - player.angle;
+                    while (relativeAngle > Math.PI) relativeAngle -= 2 * Math.PI;
+                    while (relativeAngle < -Math.PI) relativeAngle += 2 * Math.PI;
+
+                    const aimTolerance = 0.5;
+                    if (Math.abs(relativeAngle) < aimTolerance && distanceToLeak < closestHitDistance) {
+                        closestHitDistance = distanceToLeak;
+                        closestHitLeak = leak;
+                    }
+                });
+
+                if (closestHitLeak) {
+                    closestHitLeak.currentHealth -= closestHitLeak.type.repairRate;
+                    console.log(`Hit ${closestHitLeak.type.name}! Health remaining: ${closestHitLeak.currentHealth.toFixed(1)}`);
+
+                    if (closestHitLeak.currentHealth <= 0) {
+                        repairSound.currentTime = 0;
+                        repairSound.play().catch(e => console.log("Audio play prevented (repair):", e));
+                        player.score += closestHitLeak.type.scoreValue;
+                        activeLeaks = activeLeaks.filter(l => l !== closestHitLeak);
+                        console.log(`Leak repaired! Score: ${player.score}`);
+                        if (activeLeaks.length === 0) console.log("All leaks repaired! You win!");
+                    }
+                }
+            }
+
+            healthElement.textContent = Math.floor(player.health);
+            scoreElement.textContent = Math.floor(player.score);
+            posXElement.textContent = player.x.toFixed(1);
+            posYElement.textContent = player.y.toFixed(1);
+            angleElement.textContent = ((player.angle * 180 / Math.PI) % 360).toFixed(1);
+
+            if (player.health <= 0) {
+                console.log("Game Over! Score: " + player.score);
+            }
+        }
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = CEILING_COLOR;
+            ctx.fillRect(0, 0, canvas.width, canvas.height / 2);
+            ctx.fillStyle = FLOOR_COLOR;
+            ctx.fillRect(0, canvas.height / 2, canvas.width, canvas.height / 2);
+
+            const spritesToDraw = [];
+            const zBuffer = new Array(NUM_RAYS).fill(Infinity);
+
+            for (let i = 0; i < NUM_RAYS; i++) {
+                let cameraX = 2 * i / NUM_RAYS - 1;
+                let rayDirX = Math.cos(player.angle) + Math.cos(player.angle + Math.PI / 2) * cameraX * Math.tan(player.fov / 2);
+                let rayDirY = Math.sin(player.angle) + Math.sin(player.angle + Math.PI / 2) * cameraX * Math.tan(player.fov / 2);
+                let mapX = Math.floor(player.x / TILE_SIZE);
+                let mapY = Math.floor(player.y / TILE_SIZE);
+                let sideDistX, sideDistY, deltaDistX, deltaDistY, perpWallDist, stepX, stepY, hit = 0, side;
+
+                deltaDistX = (rayDirX === 0) ? Infinity : Math.abs(TILE_SIZE / rayDirX);
+                deltaDistY = (rayDirY === 0) ? Infinity : Math.abs(TILE_SIZE / rayDirY);
+
+                if (rayDirX < 0) {
+                    stepX = -1;
+                    sideDistX = (player.x - mapX * TILE_SIZE) * deltaDistX / TILE_SIZE;
+                } else {
+                    stepX = 1;
+                    sideDistX = ((mapX + 1) * TILE_SIZE - player.x) * deltaDistX / TILE_SIZE;
+                }
+                if (rayDirY < 0) {
+                    stepY = -1;
+                    sideDistY = (player.y - mapY * TILE_SIZE) * deltaDistY / TILE_SIZE;
+                } else {
+                    stepY = 1;
+                    sideDistY = ((mapY + 1) * TILE_SIZE - player.y) * deltaDistY / TILE_SIZE;
+                }
+
+                while (hit === 0) {
+                    if (sideDistX < sideDistY) {
+                        sideDistX += deltaDistX;
+                        mapX += stepX;
+                        side = 0;
+                    } else {
+                        sideDistY += deltaDistY;
+                        mapY += stepY;
+                        side = 1;
+                    }
+                    if (mapX >= 0 && mapX < MAP_WIDTH && mapY >= 0 && mapY < MAP_HEIGHT && MAP[mapY][mapX] > 0) {
+                        hit = 1;
+                    } else if (mapX < 0 || mapX >= MAP_WIDTH || mapY < 0 || mapY >= MAP_HEIGHT) {
+                        hit = 2; perpWallDist = Infinity; break;
+                    }
+                }
+
+                if (hit === 1) {
+                    if (side === 0) perpWallDist = (mapX * TILE_SIZE - player.x + (1 - stepX) * TILE_SIZE / 2) / rayDirX;
+                    else perpWallDist = (mapY * TILE_SIZE - player.y + (1 - stepY) * TILE_SIZE / 2) / rayDirY;
+
+                    zBuffer[i] = perpWallDist;
+
+                    let wallHeightScreen = (canvas.height / perpWallDist) * WALL_HEIGHT_WORLD;
+                    let drawStart = (canvas.height / 2) - (wallHeightScreen / 2);
+
+                    let wallTexture = assets.images.wall;
+                    if (wallTexture && wallTexture.naturalWidth > 0) {
+                        let wallX;
+                        if (side === 0) wallX = player.y + perpWallDist * rayDirY;
+                        else wallX = player.x + perpWallDist * rayDirX;
+                        wallX -= Math.floor(wallX / TILE_SIZE) * TILE_SIZE;
+
+                        let textureX = Math.floor(wallX / TILE_SIZE * wallTexture.width);
+                        if (side === 0 && rayDirX > 0) textureX = wallTexture.width - textureX - 1;
+                        if (side === 1 && rayDirY < 0) textureX = wallTexture.width - textureX - 1;
+                        
+                        textureX = Math.max(0, Math.min(textureX, wallTexture.width - 1));
+
+                        ctx.drawImage(wallTexture,
+                                        textureX, 0,
+                                        1, wallTexture.height,
+                                        i, drawStart,
+                                        1, wallHeightScreen);
+
+                        const shadeFactor = side === 1 ? 0.8 : 1;
+                        const distanceShade = Math.min(perpWallDist / (TILE_SIZE * 6), 1);
+                        ctx.fillStyle = `rgba(0, 0, 0, ${1 - shadeFactor * (1 - distanceShade)})`;
+                        ctx.fillRect(i, drawStart, 1, wallHeightScreen);
+                    } else {
+                        ctx.fillStyle = side === 1 ? '#3a3a3a' : '#4a4a4a';
+                        ctx.fillRect(i, drawStart, 1, wallHeightScreen);
+                    }
+                }
+            }
+
+            activeLeaks.forEach(leak => {
+                const dist = Math.sqrt(Math.pow(player.x - leak.x, 2) + Math.pow(player.y - leak.y, 2));
+                const animationScale = 1 + Math.sin(totalGameTime * 0.005 + leak.cloudAnimationOffset) * 0.1;
+
+                spritesToDraw.push({
+                    x: leak.x, y: leak.y, distance: dist, type: 'emissionCloud',
+                    data: {
+                        color: leak.type.emissionCloudColor,
+                        size: leak.type.spriteSize * 1.5 * animationScale,
+                        health: leak.currentHealth,
+                        maxHealth: leak.type.repairHealth
+                    }
+                });
+
+                spritesToDraw.push({
+                    x: leak.x, y: leak.y, distance: dist, type: 'leak',
+                    data: {
+                         image: assets.images[leak.type.image],
+                         size: leak.type.spriteSize,
+                         health: leak.currentHealth,
+                         maxHealth: leak.type.repairHealth,
+                         name: leak.type.name
+                    }
+                });
+            });
+
+            spritesToDraw.sort((a, b) => b.distance - a.distance);
+
+            const playerDirX = Math.cos(player.angle);
+            const playerDirY = Math.sin(player.angle);
+            const planeX = playerDirY * Math.tan(player.fov / 2);
+            const planeY = -playerDirX * Math.tan(player.fov / 2);
+
+            spritesToDraw.forEach(sprite => {
+                let spriteX = sprite.x - player.x;
+                let spriteY = sprite.y - player.y;
+                const invDet = 1.0 / (planeX * playerDirY - playerDirX * planeY);
+                const transformX = invDet * (playerDirY * spriteX - playerDirX * spriteY);
+                const transformY = invDet * (-planeY * spriteX + planeX * spriteY);
+
+                if (transformY > 0.1 && sprite.distance > 0) {
+                    let spriteScreenX = (canvas.width / 2) * (1 + transformX / transformY);
+                    let spriteHeightScreen = Math.abs((canvas.height / transformY) * sprite.data.size / TILE_SIZE);
+                    let spriteWidthScreen = spriteHeightScreen;
+                    let drawX = spriteScreenX - (spriteWidthScreen / 2);
+                    let drawY = (canvas.height / 2) - (spriteHeightScreen / 2);
+                    const startRay = Math.floor(Math.max(0, drawX));
+                    const endRay = Math.floor(Math.min(canvas.width - 1, drawX + spriteWidthScreen));
+                    
+                    for (let k = startRay; k < endRay; k++) {
+                        if (k >= 0 && k < NUM_RAYS && transformY < zBuffer[k]) {
+                            if (sprite.type === 'emissionCloud') {
+                                const spriteCenterX = spriteScreenX;
+                                const spriteCenterY = drawY + spriteHeightScreen / 2;
+                                const radius = spriteWidthScreen / 2;
+                                ctx.beginPath();
+                                ctx.arc(spriteCenterX, spriteCenterY, radius, 0, 2 * Math.PI);
+                                ctx.fillStyle = sprite.data.color;
+                                ctx.fill();
+                            }
+                            
+                            if (sprite.type === 'leak') {
+                                if (sprite.data.image && sprite.data.image.complete) {
+                                    ctx.drawImage(sprite.data.image,
+                                                  drawX, drawY,
+                                                  spriteWidthScreen, spriteHeightScreen);
+                                }
+
+                                if (k === startRay) {
+                                    const barWidth = Math.max(10, Math.min(spriteWidthScreen * 0.8, 50));
+                                    const barHeight = 5;
+                                    const healthRatio = sprite.data.health / sprite.data.maxHealth;
+                                    const healthColor = healthRatio > 0.6 ? '#00ff00' : (healthRatio > 0.3 ? '#ffff00' : '#ff0000');
+
+                                    ctx.fillStyle = '#333';
+                                    ctx.fillRect(drawX + (spriteWidthScreen - barWidth) / 2, drawY - barHeight - 5, barWidth, barHeight);
+                                    ctx.fillStyle = healthColor;
+                                    ctx.fillRect(drawX + (spriteWidthScreen - barWidth) / 2, drawY - barHeight - 5, barWidth * healthRatio, barHeight);
+                                    ctx.strokeStyle = '#000';
+                                    ctx.strokeRect(drawX + (spriteWidthScreen - barWidth) / 2, drawY - barHeight - 5, barWidth, barHeight);
+                                    
+                                    ctx.fillStyle = '#ffffff';
+                                    ctx.font = '10px "Press Start 2P"';
+                                    ctx.textAlign = 'center';
+                                    ctx.fillText(sprite.data.name, spriteScreenX, drawY - barHeight - 15);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            let ogiSprite = keys[' '] ? assets.images.ogiActivated : assets.images.ogiCarried;
+            if (ogiSprite && ogiSprite.complete) {
+                const spriteWidth = ogiSprite.naturalWidth;
+                const spriteHeight = ogiSprite.naturalHeight;
+                const drawX = canvas.width / 2 - spriteWidth / 2;
+                const drawY = canvas.height - spriteHeight;
+                ctx.drawImage(ogiSprite, drawX, drawY, spriteWidth, spriteHeight);
+            }
+        }
+
+        function gameLoop(currentTime) {
+            if (!lastFrameTime) lastFrameTime = currentTime;
+            lastFrameTime = currentTime;
+
+            frameCount++;
+            if (currentTime - lastFpsUpdateTime >= 1000) {
+                fps = Math.round(frameCount / ((currentTime - lastFpsUpdateTime) / 1000));
+                fpsElement.textContent = fps;
+                frameCount = 0;
+                lastFpsUpdateTime = currentTime;
+            }
+
+            update(currentTime);
+            render();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        loadAssets();
+    </script>
+</body>
+</html>
