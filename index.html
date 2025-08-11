@@ -44,7 +44,6 @@
             z-index: 10;
         }
         
-        /* New style to center the UI elements */
         #gameUI span {
             margin: 0 15px; 
         }
@@ -116,7 +115,7 @@
             background-position: center;
         }
 
-        #victoryScreen {
+        #victoryScreen, #gameOverScreen {
             position: absolute;
             top: 0;
             left: 0;
@@ -124,19 +123,19 @@
             height: 100%;
             background-color: rgba(0, 0, 0, 0.9);
             z-index: 100;
-            display: none; /* Hidden by default */
+            display: none;
             justify-content: center;
             align-items: center;
             flex-direction: column;
         }
 
-        #victoryScreen img {
+        #victoryScreen img, #gameOverScreen img {
             width: 100%;
             height: 100%;
             object-fit: contain;
         }
         
-        #victoryText {
+        #victoryText, #gameOverText {
             position: absolute;
             top: 50%;
             left: 50%;
@@ -159,11 +158,17 @@
         <img id="victorySplash" src="" alt="Victory!">
         <div id="victoryText"></div>
     </div>
+    
+    <div id="gameOverScreen">
+        <img id="gameOverSplash" src="" alt="Game Over!">
+        <div id="gameOverText"></div>
+    </div>
 
     <div id="gameContainer">
         <canvas id="gameCanvas" width="640" height="480"></canvas>
         <div id="crosshair"></div>
         <div id="gameUI">
+            <span>LIVES: <span id="lives">3</span></span>
             <span>HEALTH: <span id="health">100</span></span>
             <span>SCORE: <span id="score">0</span></span>
             <span>TIME: <span id="timer">00:00</span></span>
@@ -190,6 +195,9 @@
         const victoryScreen = document.getElementById('victoryScreen');
         const victoryText = document.getElementById('victoryText');
         const victorySplash = document.getElementById('victorySplash');
+        const gameOverScreen = document.getElementById('gameOverScreen');
+        const gameOverText = document.getElementById('gameOverText');
+        const gameOverSplash = document.getElementById('gameOverSplash');
 
         const MAP_WIDTH = 24;
         const MAP_HEIGHT = 12;
@@ -198,22 +206,24 @@
 
         const MAP_DATA_RAW = [
             "wwwwwwwwwwwwwwwwwwwwwwww",
-            "wPww   ww   wwL www    w",
-            "wlww w ww w www www ww w",
-            "w ww w ww w www www ww w",
-            "w lW w ww w Lww wwL ww w",
-            "w wwlw w  L ww  www wl w",
-            "w ww w Lw w Lww www ww w",
-            "w ww w wL w Lww www ww w",
-            "w ww w ww w wLw wLw ww w",
-            "w    w    w         ww w",
-            "wwwwww        wwww    lw",
-            "wwwwwwwwwwwwwwwwwwwwwwwwww"
+            "wPww   ww   wwL www    w",
+            "w ww w ww v www www ww w",
+            "w ww w ww w www www ww w",
+            "w lW w ww w Lww wwL ww w",
+            "w wwlw w  L ww  www wl w",
+            "w ww w Lw w Lww www ww w",
+            "w ww w wL w Lww www ww w",
+            "w ww w ww w wLw wLw ww w",
+            "wv   w    w         ww w",
+            "wwwwww         wwww   lw",
+            "wwwwwwwwwwwwwwwwwwwwwwwwww"
         ];
 
         const MAP = [];
         const initialLeaks = [];
         let playerStartX, playerStartY;
+        let villainStartX, villainStartY;
+
         for (let y = 0; y < MAP_DATA_RAW.length; y++) {
             MAP[y] = [];
             for (let x = 0; x < MAP_DATA_RAW[y].length; x++) {
@@ -227,6 +237,9 @@
                         playerStartY = y * TILE_SIZE + TILE_SIZE / 2;
                     } else if (char === 'L') {
                         initialLeaks.push({ x: x, y: y });
+                    } else if (char === 'v') {
+                        villainStartX = x * TILE_SIZE + TILE_SIZE / 2;
+                        villainStartY = y * TILE_SIZE + TILE_SIZE / 2;
                     }
                 }
             }
@@ -240,14 +253,23 @@
             turnSpeed: 0.05,
             moveSpeed: 3,
             health: 100,
-            score: 0
+            lives: 3,
+            score: 0,
+            respawnInvincibility: 0
+        };
+        
+        const villain = {
+            x: villainStartX || TILE_SIZE * 10.5,
+            y: villainStartY || TILE_SIZE * 8.5,
+            speed: 1.0,
+            harm: 0.5,
+            spriteSize: 300
         };
 
         const NUM_RAYS = canvas.width;
         const FLOOR_COLOR = '#333333';
         const CEILING_COLOR = '#222222';
 
-        // --- Asset Management (Refactored) ---
         const assets = {
             images: {},
             audio: {}
@@ -262,7 +284,9 @@
                 moderateLeak: 'moderate_leak_sprite.png',
                 majorLeak: 'major_leak_sprite.png',
                 splashScreen: 'splash_start.png',
-                splashVictory: 'splash_victory.png'
+                splashVictory: 'splash_victory.png',
+                splashGameOver: 'splash_gameover.png',
+                rogueDrone: 'rogue_drone.png'
             },
             audio: {
                 damage: 'damage.mp3',
@@ -324,11 +348,9 @@
                 startScreen.style.display = 'flex';
             } catch (error) {
                 console.error("Game failed to start due to asset loading error:", error);
-                // --- Display a specific error message on screen ---
                 loadingScreen.style.color = '#ff0000';
                 loadingScreen.style.fontSize = '18px';
                 loadingScreen.innerHTML = `<div><span style="font-size: 24px;">ERROR:</span><br><br>Failed to load assets.<br>Please check the file names and locations.<br><br>${error}</div>`;
-                // --------------------------------------------------
             }
         }
 
@@ -350,7 +372,6 @@
             gameLoopId = requestAnimationFrame(gameLoop);
         });
 
-        // --- Game State and Player Input ---
         const LEAK_TYPES = {
             MINOR: { name: "Minor Leak", harm: 0.05, image: 'minorLeak', spriteSize: 300, repairHealth: 50, repairRate: 5, scoreValue: 100, emissionCloudColor: 'rgba(0, 255, 0, 0.4)' },
             MODERATE: { name: "Moderate Leak", harm: 0.15, image: 'moderateLeak', spriteSize: 450, repairHealth: 100, repairRate: 10, scoreValue: 250, emissionCloudColor: 'rgba(255, 255, 0, 0.4)' },
@@ -404,11 +425,19 @@
         const posXElement = document.getElementById('posX');
         const posYElement = document.getElementById('posY');
         const angleElement = document.getElementById('angle');
+        const livesElement = document.getElementById('lives');
         const healthElement = document.getElementById('health');
         const scoreElement = document.getElementById('score');
         const timerElement = document.getElementById('timer');
+        
+        // --- NEW: Damage Effect Object ---
+        const damageEffect = {
+            damageTaken: false,
+            duration: 500, // in milliseconds
+            timer: 0
+        };
+        // ---------------------------------
 
-        // --- Core Game Functions ---
         function showVictoryScreen() {
             gameIsOver = true;
             cancelAnimationFrame(gameLoopId);
@@ -424,6 +453,16 @@
             victoryScreen.style.display = 'flex';
         }
 
+        function showGameOverScreen() {
+            gameIsOver = true;
+            cancelAnimationFrame(gameLoopId);
+            document.getElementById('backgroundMusic').pause();
+            document.getElementById('backgroundMusic').volume = 0;
+            
+            gameOverSplash.src = assets.images.splashGameOver.src;
+            gameOverScreen.style.display = 'flex';
+        }
+
         function formatTime(milliseconds) {
             const totalSeconds = Math.floor(milliseconds / 1000);
             const minutes = Math.floor(totalSeconds / 60);
@@ -431,9 +470,11 @@
             return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
         }
 
-
         function update(currentTime) {
-            totalGameTime += (currentTime - lastFrameTime);
+            const deltaTime = currentTime - lastFrameTime;
+            totalGameTime += deltaTime;
+            lastFrameTime = currentTime;
+
             let newX = player.x;
             let newY = player.y;
 
@@ -474,21 +515,67 @@
                 player.y = newY;
             }
             
-            let tookDamageThisFrame = false;
-            activeLeaks.forEach(leak => {
-                const dist = Math.sqrt(Math.pow(player.x - leak.x, 2) + Math.pow(player.y - leak.y, 2));
-                if (dist < TILE_SIZE / 2) {
-                    player.health -= leak.type.harm;
-                    player.health = Math.max(0, player.health);
-                    if (player.health < lastHealth) tookDamageThisFrame = true;
-                }
-            });
+            const distToVillain = Math.sqrt(Math.pow(player.x - villain.x, 2) + Math.pow(player.y - villain.y, 2));
+            if (distToVillain > TILE_SIZE / 2) {
+                const angleToPlayer = Math.atan2(player.y - villain.y, player.x - villain.x);
+                let newVillainX = villain.x + Math.cos(angleToPlayer) * villain.speed;
+                let newVillainY = villain.y + Math.sin(angleToPlayer) * villain.speed;
 
-            if (tookDamageThisFrame && damageSound.paused) {
-                damageSound.currentTime = 0;
-                damageSound.play().catch(e => console.log("Audio play prevented (damage):", e));
+                const villainMapX = Math.floor(villain.x / TILE_SIZE);
+                const villainMapY = Math.floor(villain.y / TILE_SIZE);
+                const newVillainMapX = Math.floor(newVillainX / TILE_SIZE);
+                const newVillainMapY = Math.floor(newVillainY / TILE_SIZE);
+
+                if (newVillainMapX >= 0 && newVillainMapX < MAP_WIDTH && MAP[villainMapY] && MAP[villainMapY][newVillainMapX] === 0) {
+                    villain.x = newVillainX;
+                }
+                if (newVillainMapY >= 0 && newVillainMapY < MAP_HEIGHT && MAP[newVillainMapY] && MAP[newVillainMapY][villainMapX] === 0) {
+                    villain.y = newVillainY;
+                }
             }
+            
+            if (player.respawnInvincibility <= 0) {
+                if (distToVillain < TILE_SIZE / 2) {
+                    player.health -= villain.harm;
+                }
+                activeLeaks.forEach(leak => {
+                    const dist = Math.sqrt(Math.pow(player.x - leak.x, 2) + Math.pow(player.y - leak.y, 2));
+                    if (dist < TILE_SIZE / 2) {
+                        player.health -= leak.type.harm;
+                    }
+                });
+            } else {
+                player.respawnInvincibility -= 1;
+            }
+            
+            // --- NEW: Trigger damage effect ---
+            if (player.health < lastHealth) {
+                damageEffect.damageTaken = true;
+                damageEffect.timer = damageEffect.duration;
+                if (damageSound.paused) {
+                    damageSound.currentTime = 0;
+                    damageSound.play().catch(e => console.log("Audio play prevented (damage):", e));
+                }
+            } else if (damageEffect.timer > 0) {
+                damageEffect.timer -= deltaTime;
+            } else {
+                damageEffect.damageTaken = false;
+            }
+            // ---------------------------------
+            
             lastHealth = player.health;
+            
+            if (player.health <= 0) {
+                player.lives--;
+                if (player.lives > 0) {
+                    player.health = 100;
+                    player.x = playerStartX;
+                    player.y = playerStartY;
+                    player.respawnInvincibility = 120;
+                } else {
+                    showGameOverScreen();
+                }
+            }
 
             if (keys[' '] && (currentTime - lastShotTime > SHOOT_COOLDOWN)) {
                 lastShotTime = currentTime;
@@ -535,17 +622,12 @@
                 }
             }
             
-            // --- UI Update ---
+            livesElement.textContent = player.lives;
             healthElement.textContent = Math.floor(player.health);
             scoreElement.textContent = Math.floor(player.score);
             if (gameStartTime > 0) {
                 const elapsed = Date.now() - gameStartTime;
                 timerElement.textContent = formatTime(elapsed);
-            }
-            // -----------------
-
-            if (player.health <= 0) {
-                console.log("Game Over! Score: " + player.score);
             }
         }
 
@@ -635,7 +717,7 @@
                         ctx.fillStyle = `rgba(0, 0, 0, ${1 - shadeFactor * (1 - distanceShade)})`;
                         ctx.fillRect(i, drawStart, 1, wallHeightScreen);
                     } else {
-                        ctx.fillStyle = side === 1 ? '#3a3a3a' : '#4a4a4a';
+                        ctx.fillStyle = side === 1 ? '#3a3a3a' : '#4a3a3a';
                         ctx.fillRect(i, drawStart, 1, wallHeightScreen);
                     }
                 }
@@ -665,6 +747,12 @@
                          name: leak.type.name
                     }
                 });
+            });
+            
+            const distToVillain = Math.sqrt(Math.pow(player.x - villain.x, 2) + Math.pow(player.y - villain.y, 2));
+            spritesToDraw.push({
+                x: villain.x, y: villain.y, distance: distToVillain, type: 'villain',
+                data: { image: assets.images.rogueDrone, size: villain.spriteSize }
             });
 
             spritesToDraw.sort((a, b) => b.distance - a.distance);
@@ -702,14 +790,13 @@
                                 ctx.fill();
                             }
                             
-                            if (sprite.type === 'leak') {
+                            if (sprite.type === 'leak' || sprite.type === 'villain') {
                                 if (sprite.data.image && sprite.data.image.complete) {
                                     ctx.drawImage(sprite.data.image,
                                                 drawX, drawY,
                                                 spriteWidthScreen, spriteHeightScreen);
                                 }
-
-                                if (k === startRay) {
+                                if (sprite.type === 'leak' && k === startRay) {
                                     const barWidth = Math.max(10, Math.min(spriteWidthScreen * 0.8, 50));
                                     const barHeight = 5;
                                     const healthRatio = sprite.data.health / sprite.data.maxHealth;
@@ -741,14 +828,21 @@
                 const drawY = canvas.height - spriteHeight;
                 ctx.drawImage(ogiSprite, drawX, drawY, spriteWidth, spriteHeight);
             }
+
+            // --- NEW: Render damage effect ---
+            if (damageEffect.damageTaken && damageEffect.timer > 0) {
+                const alpha = (Math.sin(totalGameTime * 0.02) + 1) / 2 * (damageEffect.timer / damageEffect.duration) * 0.5;
+                ctx.fillStyle = `rgba(255, 0, 0, ${alpha})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+            // ---------------------------------
         }
 
         function gameLoop(currentTime) {
             if (gameIsOver) return;
 
             if (!lastFrameTime) lastFrameTime = currentTime;
-            lastFrameTime = currentTime;
-
+            
             frameCount++;
             if (currentTime - lastFpsUpdateTime >= 1000) {
                 fps = Math.round(frameCount / ((currentTime - lastFpsUpdateTime) / 1000));
